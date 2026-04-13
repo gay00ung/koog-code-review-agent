@@ -3,6 +3,8 @@ package net.lateinit
 import ai.koog.agents.core.agent.*
 import ai.koog.agents.core.tools.*
 import ai.koog.agents.ext.tool.file.*
+import ai.koog.agents.ext.tool.search.*
+import ai.koog.agents.features.eventHandler.feature.handleEvents
 import ai.koog.prompt.executor.clients.*
 import ai.koog.prompt.executor.clients.anthropic.*
 import ai.koog.prompt.executor.clients.google.*
@@ -12,6 +14,7 @@ import ai.koog.prompt.executor.ollama.client.*
 import ai.koog.prompt.llm.*
 import ai.koog.rag.base.files.*
 import kotlinx.coroutines.*
+import kotlinx.io.Source
 import java.nio.file.*
 
 /**
@@ -28,27 +31,17 @@ import java.nio.file.*
  */
 fun main(args: Array<String>) = runBlocking {
     val workspacePath = System.getProperty("user.dir")
-    val fileSystem: FileSystemProvider.ReadOnly<Path> = JVMFileSystemProvider.ReadOnly
+    val workspaceRoot = Path.of(workspacePath).toAbsolutePath().normalize()
+    val fileSystem = createWorkspaceFileSystem(workspaceRoot)
 
     val toolRegistry = ToolRegistry {
         tool(ListDirectoryTool(fileSystem))
         tool(ReadFileTool(fileSystem))
+        tool(RegexSearchTool(fileSystem))
     }
 
     // 사용자가 인수를 넘기면 그 내용을 그대로 쓰고, 없으면 기본 데모 질문을 사용합니다.
-    val prompt = if (args.isNotEmpty()) {
-        args.joinToString(" ")
-    } else {
-        """
-        현재 작업 디렉터리 `$workspacePath` 안의 프로젝트를 분석해줘.
-        반드시 도구를 사용해서 디렉터리와 파일을 직접 확인한 뒤 답해줘.
-        우선 `build.gradle.kts`와 `src/main/kotlin/Main.kt`를 읽고,
-        1. 프로젝트 목적 추정
-        2. 현재 Koog 학습 상태
-        3. 다음에 해볼 만한 실습 3개
-        형식으로 한국어로 정리해줘.
-        """.trimIndent()
-    }
+    val prompt = buildPrompt(args, workspacePath)
 
     // 환경 변수 조합에 따라 provider와 모델을 선택합니다.
     val runtime = selectRuntime()
@@ -63,10 +56,29 @@ fun main(args: Array<String>) = runBlocking {
             systemPrompt = """
                 You are a read-only Kotlin project assistant.
                 You must inspect the local workspace with tools before answering.
+                Search before reading files whenever possible.
+                Keep search results small and focused.
+                Use RegexSearchTool with limit 5 or less.
+                Read no more than 3 files unless the user explicitly asks for more.
+                Never inspect generated folders such as .git, .gradle, .idea, or build.
                 Do not invent files that you did not inspect.
                 Mention the provider and model you are using when it is relevant.
                 Answer in Korean.
-            """.trimIndent()
+            """.trimIndent(),
+            // 에이전트가 어떤 모델 호출과 도구 실행을 하는지 콘솔에서 추적할 수 있게 합니다.
+            installFeatures = {
+                handleEvents {
+                    onLLMCallStarting { context ->
+                        println("[llm:start] model=${context.model.id} tools=${context.tools.size}")
+                    }
+                    onToolCallStarting { context ->
+                        println("[tool:start] name=${context.toolName} args=${context.toolArgs}")
+                    }
+                    onToolCallCompleted { context ->
+                        println("[tool:done] name=${context.toolName} result=${context.toolResult.toString().take(200)}")
+                    }
+                }
+            }
         )
 
         // 에이전트를 실행한 뒤 최종 응답을 콘솔에 출력합니다.
@@ -207,4 +219,173 @@ private fun resolveAnthropicModelName(): String {
     return modelName
         ?: legacyModelName
         ?: error("ANTHROPIC_MODEL_NAME or ANTHROPIC_MODEL environment variable is not set")
+}
+
+/**
+ * Koog 파일 도구가 생성물과 IDE 메타데이터를 읽지 않도록 작업 공간 파일 시스템을 제한합니다.
+ *
+ * 이 파일 시스템은 작업 루트 밖의 경로를 숨기고, `.git`, `.gradle`, `.idea`, `build` 디렉터리와
+ * `jar`, `class`, `log` 같은 대용량 또는 바이너리 성격의 파일을 기본적으로 제외합니다.
+ *
+ * @param workspaceRoot 현재 프로젝트의 작업 루트 절대 경로입니다.
+ * @return 안전한 탐색 범위만 노출하는 읽기 전용 파일 시스템입니다.
+ */
+private fun createWorkspaceFileSystem(workspaceRoot: Path): FileSystemProvider.ReadOnly<Path> {
+    return RestrictedWorkspaceFileSystemProvider(
+        delegate = JVMFileSystemProvider.ReadOnly,
+        workspaceRoot = workspaceRoot,
+    )
+}
+
+/**
+ * 사용자 요청을 안전한 도구 사용 규칙과 함께 감싼 최종 프롬프트를 만듭니다.
+ *
+ * 직접 전달한 명령행 질문이 있더라도 그대로 모델에 넘기지 않고, 검색 범위와 읽기 개수를 제한하는
+ * 운영 규칙을 먼저 붙입니다. 이렇게 하면 도구 결과가 과도하게 누적되어 컨텍스트가 폭증하는 문제를 줄일 수 있습니다.
+ *
+ * @param args 명령행에서 받은 사용자 요청 인수입니다.
+ * @param workspacePath 현재 작업 디렉터리의 절대 경로 문자열입니다.
+ * @return 안전 규칙이 포함된 최종 사용자 프롬프트입니다.
+ */
+private fun buildPrompt(args: Array<String>, workspacePath: String): String {
+    val userRequest = if (args.isNotEmpty()) {
+        args.joinToString(" ")
+    } else {
+        """
+        우선 `tool(`, `AIAgent(`, `MultiLLMPromptExecutor`, `Anthropic`, `Ollama`, `Google` 관련 코드를 검색하고,
+        1. 현재 에이전트 구조
+        2. 지원하는 provider 종류
+        3. 다음 단계에서 개선할 만한 점 3개
+        형식으로 한국어로 정리해줘.
+        """.trimIndent()
+    }
+
+    return """
+        현재 작업 디렉터리 `$workspacePath` 안의 프로젝트를 분석해줘.
+        반드시 먼저 RegexSearchTool 또는 디렉터리 도구로 후보 파일을 찾은 뒤, 필요한 파일만 ReadFileTool로 읽어라.
+        다음 운영 규칙을 반드시 지켜라.
+        - RegexSearchTool의 `limit`는 항상 5 이하로 유지해라.
+        - RegexSearchTool의 `path`는 우선 `$workspacePath/src/main/kotlin`과 `$workspacePath` 루트의 텍스트 설정 파일에만 사용해라.
+        - `.git`, `.gradle`, `.idea`, `build`, `*.jar`, `*.class`, `*.log`는 읽거나 검색하지 마라.
+        - ReadFileTool은 꼭 필요한 파일만 최대 3개 읽어라.
+        - 답변에는 실제로 확인한 파일 경로만 근거로 써라.
+
+        사용자 요청:
+        $userRequest
+    """.trimIndent()
+}
+
+/**
+ * 특정 경로가 에이전트 도구에 노출되어도 되는 작업 공간 경로인지 판별합니다.
+ *
+ * @param path 검사할 실제 파일 시스템 경로입니다.
+ * @param workspaceRoot 현재 프로젝트의 작업 루트입니다.
+ * @return 작업 공간 내부이면서 생성물/메타데이터 경로가 아니면 `true`입니다.
+ */
+private fun isAllowedWorkspacePath(path: Path, workspaceRoot: Path): Boolean {
+    val normalizedPath = path.toAbsolutePath().normalize()
+
+    if (!normalizedPath.startsWith(workspaceRoot)) {
+        return false
+    }
+
+    if (normalizedPath == workspaceRoot) {
+        return true
+    }
+
+    val relativePath = workspaceRoot.relativize(normalizedPath)
+    val segments = relativePath.map { it.toString() }
+    val excludedDirectories = setOf(".git", ".gradle", ".idea", "build")
+
+    if (segments.any { it in excludedDirectories }) {
+        return false
+    }
+
+    val fileName = normalizedPath.fileName?.toString().orEmpty()
+    val excludedExtensions = setOf("jar", "class", "log")
+    val extension = fileName.substringAfterLast('.', missingDelimiterValue = "")
+
+    return extension !in excludedExtensions
+}
+
+/**
+ * 생성물 디렉터리와 바이너리 파일을 숨기는 작업 공간 전용 읽기 전용 파일 시스템입니다.
+ *
+ * Koog의 파일 도구는 이 래퍼를 통해 경로를 탐색하므로, 허용되지 않은 경로는 목록에서 빠지고
+ * 직접 읽으려고 해도 접근할 수 없습니다.
+ *
+ * @property delegate 실제 파일 시스템 작업을 수행하는 기반 provider입니다.
+ * @property workspaceRoot 현재 프로젝트의 작업 루트 절대 경로입니다.
+ */
+private class RestrictedWorkspaceFileSystemProvider(
+    private val delegate: FileSystemProvider.ReadOnly<Path>,
+    private val workspaceRoot: Path,
+) : FileSystemProvider.ReadOnly<Path> {
+
+    override fun toAbsolutePathString(path: Path): String = delegate.toAbsolutePathString(path)
+
+    override fun fromAbsolutePathString(path: String): Path = delegate.fromAbsolutePathString(path)
+
+    override fun joinPath(base: Path, vararg parts: String): Path = delegate.joinPath(base, *parts)
+
+    override fun name(path: Path): String = delegate.name(path)
+
+    override fun extension(path: Path): String = delegate.extension(path)
+
+    override suspend fun metadata(path: Path): FileMetadata {
+        ensureAllowed(path)
+        return requireNotNull(delegate.metadata(path)) {
+            "Metadata is unavailable for $path"
+        }
+    }
+
+    override suspend fun getFileContentType(path: Path): FileMetadata.FileContentType {
+        ensureAllowed(path)
+        return delegate.getFileContentType(path)
+    }
+
+    override suspend fun list(directory: Path): List<Path> {
+        if (!isAllowedWorkspacePath(directory, workspaceRoot)) {
+            return emptyList()
+        }
+
+        return delegate.list(directory)
+            .filter { isAllowedWorkspacePath(it, workspaceRoot) }
+    }
+
+    override fun parent(path: Path): Path =
+        requireNotNull(delegate.parent(path)) { "Parent path is unavailable for $path" }
+
+    override fun relativize(root: Path, path: Path): String =
+        requireNotNull(delegate.relativize(root, path)) { "Relative path is unavailable for $path" }
+
+    override suspend fun exists(path: Path): Boolean {
+        return isAllowedWorkspacePath(path, workspaceRoot) && delegate.exists(path)
+    }
+
+    override suspend fun readBytes(path: Path): ByteArray {
+        ensureAllowed(path)
+        return delegate.readBytes(path)
+    }
+
+    override suspend fun inputStream(path: Path): Source {
+        ensureAllowed(path)
+        return delegate.inputStream(path)
+    }
+
+    override suspend fun size(path: Path): Long {
+        ensureAllowed(path)
+        return delegate.size(path)
+    }
+
+    /**
+     * 허용되지 않은 경로 접근을 조기에 차단합니다.
+     *
+     * @param path 실제로 읽으려는 대상 경로입니다.
+     */
+    private fun ensureAllowed(path: Path) {
+        if (!isAllowedWorkspacePath(path, workspaceRoot)) {
+            throw NoSuchFileException(path.toString())
+        }
+    }
 }
