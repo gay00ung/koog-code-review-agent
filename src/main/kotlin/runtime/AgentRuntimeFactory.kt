@@ -6,6 +6,8 @@ import ai.koog.prompt.executor.clients.anthropic.AnthropicLLMClient
 import ai.koog.prompt.executor.clients.anthropic.AnthropicModels
 import ai.koog.prompt.executor.clients.google.GoogleLLMClient
 import ai.koog.prompt.executor.clients.google.GoogleModels
+import ai.koog.prompt.executor.clients.openai.OpenAILLMClient
+import ai.koog.prompt.executor.clients.openai.OpenAIModels
 import ai.koog.prompt.executor.llms.MultiLLMPromptExecutor
 import ai.koog.prompt.executor.ollama.client.OllamaClient
 import ai.koog.prompt.executor.ollama.client.OllamaModels
@@ -14,10 +16,14 @@ import ai.koog.prompt.executor.ollama.client.OllamaModels
  * 환경 변수 조합을 바탕으로 사용할 provider와 모델을 결정합니다.
  *
  * 우선순위는 다음과 같습니다.
- * 1. `KOOG_PROVIDER`가 명시된 경우
+ * 1. `KOOG_PROVIDER`가 명시된 경우 (`openai`, `google`, `ollama`, `anthropic`, `custom_anthropic`)
  * 2. custom Anthropic 관련 환경 변수가 모두 있는 경우
  * 3. Ollama 모델 환경 변수가 있는 경우
  * 4. 위 조건이 모두 아니면 Google
+ *
+ * 명시적 provider가 있으면 다른 provider 관련 환경 변수가 이미 설정되어 있어도
+ * 해당 값을 우선 적용합니다.
+ * OpenAI는 현재 자동 선택 대상이 아니며, `KOOG_PROVIDER=openai`로 명시했을 때만 선택됩니다.
  *
  * @return 현재 실행에 사용할 런타임 설정입니다.
  */
@@ -29,6 +35,7 @@ fun selectRuntime(): AgentRuntime {
 
     return when {
         explicitProvider == "anthropic" || explicitProvider == "custom_anthropic" -> createCustomAnthropicRuntime()
+        explicitProvider == "openai" -> createOpenAIRuntime()
         explicitProvider == "ollama" -> createOllamaRuntime()
         explicitProvider == "google" -> createGoogleRuntime()
         hasCustomAnthropic -> createCustomAnthropicRuntime()
@@ -74,6 +81,25 @@ private fun createOllamaRuntime(): AgentRuntime {
         provider = "ollama",
         executor = MultiLLMPromptExecutor(OllamaClient(baseUrl)),
         model = model,
+    )
+}
+
+/**
+ * OpenAI executor와 기본 모델을 구성합니다.
+ *
+ * `OPENAI_API_KEY`를 사용해 OpenAI 클라이언트를 만들고,
+ * 현재 기본 채팅 모델로 `GPT5_4`를 선택합니다.
+ *
+ * @return OpenAI provider용 런타임 설정입니다.
+ */
+private fun createOpenAIRuntime(): AgentRuntime {
+    val apiKey = System.getenv("OPENAI_API_KEY")
+        ?: error("OPENAI_API_KEY environment variable is not set")
+
+    return AgentRuntime(
+        provider = "openai",
+        executor = MultiLLMPromptExecutor(OpenAILLMClient(apiKey)),
+        model = OpenAIModels.Chat.GPT5_4,
     )
 }
 
