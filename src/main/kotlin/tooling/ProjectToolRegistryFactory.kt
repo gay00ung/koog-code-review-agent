@@ -5,6 +5,9 @@ import ai.koog.agents.ext.tool.file.EditFileTool
 import ai.koog.agents.ext.tool.file.ListDirectoryTool
 import ai.koog.agents.ext.tool.file.ReadFileTool
 import ai.koog.agents.ext.tool.search.RegexSearchTool
+import ai.koog.agents.ext.tool.shell.ExecuteShellCommandTool
+import ai.koog.agents.ext.tool.shell.JvmShellCommandExecutor
+import ai.koog.agents.ext.tool.shell.PrintShellCommandConfirmationHandler
 import java.nio.file.Path
 import net.lateinit.fs.createWorkspaceFileSystem
 import net.lateinit.fs.createWritableWorkspaceFileSystem
@@ -27,5 +30,11 @@ fun createProjectToolRegistry(workspaceRoot: Path): ToolRegistry {
         tool(ReadFileTool(readFileSystem))
         tool(RegexSearchTool(readFileSystem))
         tool(EditFileTool(writeFileSystem))
+        tool(
+            ExecuteShellCommandTool(
+                executor = JvmShellCommandExecutor(),
+                confirmationHandler = PrintShellCommandConfirmationHandler(),
+            )
+        )
     }
 }
