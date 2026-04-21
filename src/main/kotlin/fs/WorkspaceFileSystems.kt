@@ -84,7 +84,7 @@ private fun isAllowedWorkspacePath(path: Path, workspaceRoot: Path): Boolean {
  */
 private fun isAllowedWritablePath(path: Path, workspaceRoot: Path): Boolean {
     val normalizedPath = path.toAbsolutePath().normalize()
-    val allowedFile = workspaceRoot.resolve("README.md").toAbsolutePath().normalize()
+    val allowedFile = workspaceRoot.resolve("src/main/kotlin/prompt/PromptFactory.kt").toAbsolutePath().normalize()
     return normalizedPath == allowedFile
 }
 

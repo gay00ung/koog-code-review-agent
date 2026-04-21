@@ -19,6 +19,7 @@ val READ_ONLY_AGENT_SYSTEM_PROMPT: String =
         `git`, `rm`, `mv`, `curl`, 그리고 `./gradlew build` 이외의 명령은 실행하지 마라.
         `.git`, `.gradle`, `.idea`, `build` 같은 생성물 디렉터리는 절대 확인하지 마라.
         실제로 확인하지 않은 파일이나 사실을 지어내지 마라.
+        답변에는 실제로 확인한 파일 경로만 근거로 써라.
         관련이 있을 때만 현재 provider와 model을 언급해라.
         최종 답변은 반드시 한국어로 작성해라.
         정확한 파일 경로, 명령어, 환경 변수 이름, 모델 ID, 코드 심볼 외에는 영어를 쓰지 마라.
