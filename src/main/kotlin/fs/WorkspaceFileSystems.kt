@@ -8,6 +8,11 @@ import kotlinx.io.Source
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 
+private val ALLOWED_WRITABLE_RELATIVE_PATHS = setOf(
+    "src/main/kotlin/prompt/PromptFactory.kt",
+    "src/main/kotlin/runtime/AgentRuntimeFactory.kt",
+)
+
 /**
  * Koog 파일 도구가 생성물과 IDE 메타데이터를 읽지 않도록 작업 공간 파일 시스템을 제한합니다.
  *
@@ -25,13 +30,13 @@ fun createWorkspaceFileSystem(workspaceRoot: Path): FileSystemProvider.ReadOnly<
 }
 
 /**
- * Koog 수정 도구가 `README.md`만 바꿀 수 있도록 제한된 쓰기 파일 시스템을 만듭니다.
+ * Koog 수정 도구가 허용된 파일 목록만 바꿀 수 있도록 제한된 쓰기 파일 시스템을 만듭니다.
  *
  * 읽기 전용 탐색용 파일 시스템과 분리해서, 수정 도구는 이 provider를 통해서만 파일에 접근합니다.
- * 현재 단계에서는 학습 범위를 좁히기 위해 작업 루트의 `README.md` 한 파일만 쓰기 대상으로 허용합니다.
+ * 현재 단계에서는 학습 범위를 좁히기 위해 미리 허용한 소수의 파일만 쓰기 대상으로 노출합니다.
  *
  * @param workspaceRoot 현재 프로젝트의 작업 루트 절대 경로입니다.
- * @return `README.md`에 대해서만 읽기/쓰기 작업을 허용하는 읽기-쓰기 파일 시스템입니다.
+ * @return 허용된 파일 목록에 대해서만 읽기/쓰기 작업을 허용하는 읽기-쓰기 파일 시스템입니다.
  */
 fun createWritableWorkspaceFileSystem(workspaceRoot: Path): FileSystemProvider.ReadWrite<Path> {
     return RestrictedWritableWorkspaceFileSystemProvider(
@@ -76,16 +81,25 @@ private fun isAllowedWorkspacePath(path: Path, workspaceRoot: Path): Boolean {
 /**
  * 특정 경로가 수정 가능한 경로인지 판별합니다.
  *
- * 현재는 학습용 안전장치로 작업 루트의 `README.md`만 수정 대상으로 허용합니다.
+ * 현재는 학습용 안전장치로 미리 정의한 상대 경로 목록에 포함된 파일만 수정 대상으로 허용합니다.
  *
  * @param path 검사할 실제 파일 시스템 경로입니다.
  * @param workspaceRoot 현재 프로젝트의 작업 루트입니다.
- * @return 경로가 작업 루트의 `README.md`와 정확히 일치하면 `true`입니다.
+ * @return 경로가 허용된 상대 경로 목록 중 하나와 일치하면 `true`입니다.
  */
 private fun isAllowedWritablePath(path: Path, workspaceRoot: Path): Boolean {
     val normalizedPath = path.toAbsolutePath().normalize()
-    val allowedFile = workspaceRoot.resolve("src/main/kotlin/prompt/PromptFactory.kt").toAbsolutePath().normalize()
-    return normalizedPath == allowedFile
+
+    if (!normalizedPath.startsWith(workspaceRoot)) {
+        return false
+    }
+
+    val relativePath = workspaceRoot
+        .relativize(normalizedPath)
+        .toString()
+        .replace("\\", "/") // Windows 경로 구분자 처리
+
+    return relativePath in ALLOWED_WRITABLE_RELATIVE_PATHS
 }
 
 /**
@@ -171,7 +185,7 @@ private class RestrictedWorkspaceFileSystemProvider(
 }
 
 /**
- * 수정 도구 전용으로 `README.md` 한 파일만 읽고 쓸 수 있게 제한하는 파일 시스템입니다.
+ * 수정 도구 전용으로 허용된 파일 목록만 읽고 쓸 수 있게 제한하는 파일 시스템입니다.
  *
  * `EditFileTool`은 읽기와 쓰기 메서드를 모두 사용하므로, 이 래퍼는 `ReadWrite` 전체를 구현합니다.
  * 허용되지 않은 경로에 대해서는 목록에서 숨기고, 직접 읽거나 쓰려 하면 즉시 예외를 던집니다.
